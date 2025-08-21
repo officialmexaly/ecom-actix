@@ -27,6 +27,8 @@ pub enum Condition {
     RbacCheck(RbacRequirement),
 }
 
+// Remove the duplicate RbacRequirement enum since it conflicts with the one in hybrid::policy
+// Instead, use the one from hybrid::policy
 #[derive(Debug, Clone)]
 pub enum RbacRequirement {
     AnyRole(Vec<String>),

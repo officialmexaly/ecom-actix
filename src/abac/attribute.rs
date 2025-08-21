@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::types::common::AttributeValue;
+// Re-export AttributeValue from types::common
+pub use crate::types::common::AttributeValue;
 use crate::abac::condition::Operator;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

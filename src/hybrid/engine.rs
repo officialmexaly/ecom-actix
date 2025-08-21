@@ -1,8 +1,8 @@
 use crate::rbac::engine::RbacEngine;
 use crate::abac::{Subject, Resource, Action, Environment, AttributeMatcher};
-use crate::abac::condition::{Condition, Operator, RbacRequirement};
+use crate::abac::condition::{Condition, Operator};
 use crate::abac::policy::AbacPolicy;
-use crate::hybrid::policy::{PolicyType, HybridPolicy, CombinationLogic};
+use crate::hybrid::policy::{PolicyType, HybridPolicy, CombinationLogic, RbacRequirement};
 use crate::types::common::{Decision, Effect, AttributeValue};
 use crate::middleware::context::AccessContext;
 use std::collections::HashMap;
@@ -306,7 +306,16 @@ impl HybridPolicyEngine {
                 self.matches_attribute_enhanced(matcher, subject, resource, action, environment)
             },
             Condition::RbacCheck(rbac_req) => {
-                self.evaluate_rbac_requirement(rbac_req, subject, resource, action)
+                // Convert abac::condition::RbacRequirement to hybrid::policy::RbacRequirement
+                let hybrid_req = match rbac_req {
+                    crate::abac::condition::RbacRequirement::AnyRole(roles) => 
+                        RbacRequirement::AnyRole(roles.clone()),
+                    crate::abac::condition::RbacRequirement::AllRoles(roles) => 
+                        RbacRequirement::AllRoles(roles.clone()),
+                    crate::abac::condition::RbacRequirement::Permission(permission) => 
+                        RbacRequirement::Permission(permission.clone()),
+                };
+                self.evaluate_rbac_requirement(&hybrid_req, subject, resource, action)
             },
         }
     }
