@@ -1,5 +1,7 @@
+// src/main.rs
 use actix_web::{web, App, HttpServer, HttpResponse};
 use serde_json;
+use std::sync::{Arc, Mutex};
 
 mod rbac;
 mod abac;
@@ -7,9 +9,11 @@ mod hybrid;
 mod middleware;
 mod handlers;
 mod types;
+mod auth; // New authentication module
 
 use hybrid::engine::HybridPolicyEngine;
 use middleware::access::HybridAccessMiddlewareFactory;
+use auth::{AuthService, AuthMiddlewareFactory, CreateUserRequest, UserProfile};
 use handlers::{user, document, health};
 use rbac::engine::RbacEngine;
 use rbac::role::{Role, RoleConstraints};
@@ -95,10 +99,6 @@ fn setup_hybrid_engine() -> HybridPolicyEngine {
 
     rbac_engine.add_role(admin_role);
     rbac_engine.add_role(user_role);
-    
-    // Assign roles to users
-    rbac_engine.assign_role_to_user("alice", "admin");
-    rbac_engine.assign_role_to_user("bob", "user");
 
     // Create hybrid engine
     let mut hybrid_engine = HybridPolicyEngine::new(rbac_engine);
@@ -179,40 +179,237 @@ fn setup_hybrid_engine() -> HybridPolicyEngine {
     hybrid_engine
 }
 
+fn setup_auth_service(rbac_engine: RbacEngine) -> AuthService {
+    let mut auth_service = AuthService::new(rbac_engine);
+
+    // Create default admin user
+    let admin_profile = UserProfile {
+        first_name: "Admin".to_string(),
+        last_name: "User".to_string(),
+        department: Some("IT".to_string()),
+        phone: None,
+        attributes: HashMap::new(),
+    };
+
+    let admin_request = CreateUserRequest {
+        username: "admin".to_string(),
+        email: "admin@example.com".to_string(),
+        password: "Admin123!@#".to_string(),
+        roles: vec!["admin".to_string()],
+        profile: admin_profile,
+    };
+
+    if let Err(e) = auth_service.create_user(admin_request) {
+        eprintln!("Warning: Could not create default admin user: {}", e);
+    }
+
+    // Create default regular user
+    let user_profile = UserProfile {
+        first_name: "John".to_string(),
+        last_name: "Doe".to_string(),
+        department: Some("Marketing".to_string()),
+        phone: Some("+1234567890".to_string()),
+        attributes: HashMap::new(),
+    };
+
+    let user_request = CreateUserRequest {
+        username: "user".to_string(),
+        email: "user@example.com".to_string(),
+        password: "User123!@#".to_string(),
+        roles: vec!["user".to_string()],
+        profile: user_profile,
+    };
+
+    if let Err(e) = auth_service.create_user(user_request) {
+        eprintln!("Warning: Could not create default user: {}", e);
+    }
+
+    auth_service
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::init();
     
+    // Setup RBAC engine
+    let rbac_engine = {
+        let mut engine = RbacEngine::new();
+        
+        // Define roles
+        let admin_role = Role {
+            name: "admin".to_string(),
+            permissions: vec![
+                Permission {
+                    resource: "users".to_string(),
+                    action: "read".to_string(),
+                    conditions: vec![],
+                },
+                Permission {
+                    resource: "users".to_string(),
+                    action: "update".to_string(),
+                    conditions: vec![],
+                },
+                Permission {
+                    resource: "documents".to_string(),
+                    action: "read".to_string(),
+                    conditions: vec![],
+                },
+                Permission {
+                    resource: "documents".to_string(),
+                    action: "update".to_string(),
+                    conditions: vec![],
+                },
+            ],
+            constraints: RoleConstraints {
+                max_duration: None,
+                valid_time_windows: vec![],
+                required_attributes: HashMap::new(),
+                location_restrictions: vec![],
+                concurrent_limit: Some(5),
+            },
+            hierarchy_level: 0,
+        };
+
+        let user_role = Role {
+            name: "user".to_string(),
+            permissions: vec![
+                Permission {
+                    resource: "documents".to_string(),
+                    action: "read".to_string(),
+                    conditions: vec!["ownership_required".to_string()],
+                },
+            ],
+            constraints: RoleConstraints {
+                max_duration: Some(Duration::hours(8)),
+                valid_time_windows: vec![],
+                required_attributes: HashMap::new(),
+                location_restrictions: vec![],
+                concurrent_limit: Some(3),
+            },
+            hierarchy_level: 1,
+        };
+
+        engine.add_role(admin_role);
+        engine.add_role(user_role);
+        engine
+    };
+
+    // Setup authentication service
+    let auth_service = setup_auth_service(rbac_engine.clone());
+    
+    // Setup hybrid policy engine
     let hybrid_engine = setup_hybrid_engine();
 
-    println!("Starting Hybrid RBAC-ABAC server on http://127.0.0.1:8080");
-    println!("Example endpoints:");
-    println!("  GET /users/123 (requires admin role)");
-    println!("  GET /documents/456 (requires ownership or admin)");
-    println!("  Use headers: x-user-id=alice, x-user-roles=admin");
+    // Wrap auth service in Arc<Mutex<>> for sharing between middleware and handlers
+    let auth_service_data = web::Data::new(Arc::new(Mutex::new(auth_service)));
+
+    println!("🚀 Starting Hybrid RBAC-ABAC Authentication & Authorization Server");
+    println!("📍 Server running on: http://127.0.0.1:8080");
+    println!();
+    println!("🔐 Authentication Endpoints:");
+    println!("  POST /api/auth/register     - Register new user");
+    println!("  POST /api/auth/login        - User login");
+    println!("  POST /api/auth/refresh      - Refresh access token");
+    println!("  POST /api/auth/logout       - User logout");
+    println!("  GET  /api/auth/profile      - Get user profile");
+    println!("  POST /api/auth/change-password - Change password");
+    println!("  POST /api/auth/reset-password  - Request password reset");
+    println!("  POST /api/auth/reset           - Reset password with token");
+    println!();
+    println!("🛡️ Protected Resource Endpoints:");
+    println!("  GET  /api/users/{{id}}        - Get user (requires admin role)");
+    println!("  PUT  /api/users/{{id}}        - Update user (requires admin role)");  
+    println!("  GET  /api/documents/{{id}}    - Get document (requires ownership or admin)");
+    println!("  PUT  /api/documents/{{id}}    - Update document (requires ownership or admin)");
+    println!();
+    println!("👤 Default Users:");
+    println!("  Username: admin | Password: Admin123!@# | Roles: admin");
+    println!("  Username: user  | Password: User123!@#  | Roles: user");
+    println!();
+    println!("📖 Usage Example:");
+    println!("  1. POST /api/auth/login with username and password");
+    println!("  2. Use returned access_token in Authorization header: 'Bearer <token>'");
+    println!("  3. Access protected endpoints with the token");
 
     HttpServer::new(move || {
         App::new()
-            .wrap(HybridAccessMiddlewareFactory::new(hybrid_engine.clone()))
+            .app_data(auth_service_data.clone())
+            // Authentication routes (no auth/authz required)
+            .service(
+                web::scope("/api/auth")
+                    .route("/register", web::post().to(auth::handlers::register))
+                    .route("/login", web::post().to(auth::handlers::login))
+                    .route("/refresh", web::post().to(auth::handlers::refresh_token))
+                    .route("/reset-password", web::post().to(auth::handlers::request_password_reset))
+                    .route("/reset", web::post().to(auth::handlers::reset_password))
+                    .route("/validate", web::post().to(auth::handlers::validate_token))
+                    // Protected auth routes (auth required)
+                    .wrap(
+                        AuthMiddlewareFactory::new((**auth_service_data.get_ref()).lock().unwrap().clone())
+                            .with_skip_paths(vec![])
+                    )
+                    .route("/logout", web::post().to(auth::handlers::logout))
+                    .route("/profile", web::get().to(auth::handlers::get_profile))
+                    .route("/change-password", web::post().to(auth::handlers::change_password))
+                    .route("/sessions/{user_id}", web::get().to(auth::handlers::get_user_sessions))
+                    .route("/sessions/{user_id}/invalidate", web::post().to(auth::handlers::invalidate_user_sessions))
+                    .route("/my-sessions", web::get().to(auth::handlers::get_my_sessions))
+            )
+            // Protected API routes (auth + authz required)
             .service(
                 web::scope("/api")
+                    .wrap(
+                        AuthMiddlewareFactory::new((**auth_service_data.get_ref()).lock().unwrap().clone())
+                            .with_skip_paths(vec![])
+                    )
+                    .wrap(HybridAccessMiddlewareFactory::new(hybrid_engine.clone()))
                     .route("/users/{id}", web::get().to(user::get_user))
                     .route("/users/{id}", web::put().to(user::update_user))
                     .route("/documents/{id}", web::get().to(document::get_document))
                     .route("/documents/{id}", web::put().to(document::update_document))
                     .route("/health", web::get().to(health::health_check))
             )
+            // Public routes (no auth required)
             .route("/", web::get().to(|| async {
                 HttpResponse::Ok().json(serde_json::json!({
-                    "message": "Hybrid RBAC-ABAC Access Control System",
+                    "name": "Hybrid RBAC-ABAC Authentication & Authorization System",
                     "version": "1.0.0",
-                    "endpoints": [
-                        "GET /api/users/{id}",
-                        "PUT /api/users/{id}",
-                        "GET /api/documents/{id}",
-                        "PUT /api/documents/{id}",
-                        "GET /api/health"
-                    ]
+                    "features": [
+                        "JWT-based authentication",
+                        "Role-based access control (RBAC)",
+                        "Attribute-based access control (ABAC)",
+                        "Hybrid policy engine",
+                        "Session management",
+                        "Password reset functionality",
+                        "Account lockout protection",
+                        "Time-based access controls"
+                    ],
+                    "auth_endpoints": {
+                        "register": "POST /api/auth/register",
+                        "login": "POST /api/auth/login",
+                        "refresh": "POST /api/auth/refresh",
+                        "logout": "POST /api/auth/logout",
+                        "profile": "GET /api/auth/profile",
+                        "change_password": "POST /api/auth/change-password",
+                        "reset_password": "POST /api/auth/reset-password"
+                    },
+                    "protected_endpoints": {
+                        "users": "GET/PUT /api/users/{{id}}",
+                        "documents": "GET/PUT /api/documents/{{id}}",
+                        "health": "GET /api/health"
+                    },
+                    "default_users": {
+                        "admin": {
+                            "username": "admin",
+                            "password": "Admin123!@#",
+                            "roles": ["admin"]
+                        },
+                        "user": {
+                            "username": "user", 
+                            "password": "User123!@#",
+                            "roles": ["user"]
+                        }
+                    }
                 }))
             }))
     })
